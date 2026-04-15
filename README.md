@@ -34,9 +34,14 @@ rl-dreamer/
 │   └── 07_custom_env.py          # Template for your own Gym-compatible env
 ├── notebooks/
 │   └── dreamerv3_colab.ipynb     # Runnable Google Colab walkthrough
+├── docs/
+│   ├── architecture.md           # World-model + actor-critic diagrams
+│   ├── LEARNING.md               # Curated reading / watching list
+│   └── tensorboard_guide.md      # What each training metric means
 └── scripts/
     ├── train.py                  # Generic CLI trainer
-    └── evaluate.py               # Load and roll out a trained agent
+    ├── evaluate.py               # Load and roll out a trained agent
+    └── record.py                 # Save MP4 videos of a trained agent
 ```
 
 ## Run it on Google Colab
@@ -144,6 +149,41 @@ sample-efficient:
 | `size200m`| 200 M  | Frontier experiments             |
 
 Pass the preset to any example via `--preset sizeNm`.
+
+## Recording rollout videos
+
+Once you have a trained checkpoint, `scripts/record.py` writes one MP4
+per episode to `<logdir>/videos/`:
+
+```bash
+pip install imageio imageio-ffmpeg
+
+python scripts/record.py \
+    --task gym_CartPole-v1 \
+    --preset size1m \
+    --logdir ~/logdir/cartpole \
+    --episodes 3
+```
+
+Use the same `--task` and `--preset` you used with `scripts/train.py`.
+The script works for every task suite listed above — for pixel-obs
+envs (DMC, Atari, Crafter, MiniGrid, Minecraft) frames come directly
+from the observation stream, and for Gym classic-control envs the
+underlying env's `render(mode='rgb_array')` is used.
+
+## Learning resources
+
+If you are new to DreamerV3 or world-model-based RL in general, start
+with these docs:
+
+- [`docs/architecture.md`](docs/architecture.md) — diagrams of the
+  world model, imagination loop, and how data flows through the agent.
+- [`docs/LEARNING.md`](docs/LEARNING.md) — curated reading / watching
+  list, including the paper, earlier Dreamer iterations, related
+  benchmarks, and external talks and videos.
+- [`docs/tensorboard_guide.md`](docs/tensorboard_guide.md) — what each
+  training metric means, what a healthy run looks like, and common
+  failure modes.
 
 ## References
 
