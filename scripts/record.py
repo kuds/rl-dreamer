@@ -56,110 +56,29 @@ def parse_args():
 
 
 def make_env_and_renderer(task: str, config):
-    """Return (dreamer_env, frame_fn).
+    """Return ``(batched_env, frame_fn)``.
 
-    ``frame_fn()`` yields an HxWx3 uint8 numpy array for the current env
-    state. For pixel envs we read ``obs["image"]``; for vector Gym envs
-    we call the underlying env's ``render()``.
+    ``frame_fn(obs)`` yields an HxWx3 uint8 numpy array for the current
+    env state. For pixel envs we read ``obs["image"]``; for vector-obs
+    Gym envs we call the underlying env's ``render()``.
     """
     import numpy as np
 
-    import dreamerv3
     from dreamerv3 import embodied
 
-    suite, _, name = task.partition("_")
-    raw_env = None  # kept alive for vector envs that need .render()
+    from env_builders import make_env
 
-    if suite == "gym":
-        import gymnasium as gym
-        from dreamerv3.embodied.envs import from_gym
-
-        raw_env = gym.make(name, render_mode="rgb_array")
-        shape = getattr(raw_env.observation_space, "shape", None)
-        is_image = shape is not None and len(shape) == 3 and shape[-1] in (1, 3)
-        env = from_gym.FromGym(raw_env, obs_key="image" if is_image else "vector")
-
-        if is_image:
-            def frame_fn(last_obs):
-                img = last_obs["image"][0]
-                return np.asarray(img, dtype=np.uint8)
-        else:
-            def frame_fn(last_obs):
-                frame = raw_env.render()
-                return np.asarray(frame, dtype=np.uint8)
-
-    elif suite == "dmc":
-        from dreamerv3.embodied.envs import dmc
-
-        env = dmc.DMC(name, repeat=2, size=(64, 64))
-
-        def frame_fn(last_obs):
-            return np.asarray(last_obs["image"][0], dtype=np.uint8)
-
-    elif suite == "atari":
-        from dreamerv3.embodied.envs import atari
-
-        env = atari.Atari(
-            name,
-            size=(64, 64),
-            gray=False,
-            noops=30,
-            lives="unused",
-            sticky=True,
-            actions="all",
-            length=108_000,
-            resize="pillow",
-        )
-
-        def frame_fn(last_obs):
-            return np.asarray(last_obs["image"][0], dtype=np.uint8)
-
-    elif suite == "crafter":
-        import crafter
-        from dreamerv3.embodied.envs import from_gym
-
-        env = crafter.Env()
-        env = from_gym.FromGym(env, obs_key="image")
-
-        def frame_fn(last_obs):
-            return np.asarray(last_obs["image"][0], dtype=np.uint8)
-
-    elif suite == "minigrid":
-        import gymnasium as gym
-        import minigrid  # noqa: F401
-        from minigrid.wrappers import ImgObsWrapper, RGBImgPartialObsWrapper
-        from dreamerv3.embodied.envs import from_gym
-
-        mg_env = gym.make(name, render_mode="rgb_array")
-        mg_env = RGBImgPartialObsWrapper(mg_env, tile_size=8)
-        mg_env = ImgObsWrapper(mg_env)
-        env = from_gym.FromGym(mg_env, obs_key="image")
-
-        def frame_fn(last_obs):
-            return np.asarray(last_obs["image"][0], dtype=np.uint8)
-
-    elif suite == "minecraft":
-        from dreamerv3.embodied.envs import minecraft
-
-        env = minecraft.MinecraftDiamond(
-            repeat=1,
-            size=(64, 64),
-            break_speed=100.0,
-            gamma=10.0,
-            sticky_attack=30,
-            sticky_jump=10,
-            pitch_limit=(-60, 60),
-            logs=False,
-        )
-
-        def frame_fn(last_obs):
-            return np.asarray(last_obs["image"][0], dtype=np.uint8)
-
-    else:
-        raise ValueError(f"Unknown task suite: {suite!r} (from task={task!r})")
-
-    env = dreamerv3.wrap_env(env, config)
+    env, info = make_env(task, config, render_mode="rgb_array", return_info=True)
     env = embodied.BatchEnv([env], parallel=False)
+
+    if info["obs_key"] == "image":
+        def frame_fn(obs):
+            return np.asarray(obs["image"][0], dtype=np.uint8)
+    else:
+        raw_env = info["raw_env"]
+        def frame_fn(_obs):
+            return np.asarray(raw_env.render(), dtype=np.uint8)
+
     return env, frame_fn
 
 

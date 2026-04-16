@@ -32,90 +32,13 @@ def parse_args():
     return args, remaining
 
 
-def make_env(task: str, config):
-    """Dispatch to the appropriate env builder based on the task prefix."""
-    import dreamerv3
-    from dreamerv3 import embodied
-
-    suite, _, name = task.partition("_")
-
-    if suite == "gym":
-        import gymnasium as gym
-        from dreamerv3.embodied.envs import from_gym
-
-        env = gym.make(name)
-        # Heuristic: if the obs space is a Box of images, call it 'image',
-        # otherwise 'vector'. Users can override via --enc.simple.*_keys.
-        import numpy as np
-
-        shape = getattr(env.observation_space, "shape", None)
-        is_image = shape is not None and len(shape) == 3 and shape[-1] in (1, 3)
-        env = from_gym.FromGym(env, obs_key="image" if is_image else "vector")
-
-    elif suite == "dmc":
-        from dreamerv3.embodied.envs import dmc
-
-        env = dmc.DMC(name, repeat=2, size=(64, 64))
-
-    elif suite == "atari":
-        from dreamerv3.embodied.envs import atari
-
-        env = atari.Atari(
-            name,
-            size=(64, 64),
-            gray=False,
-            noops=30,
-            lives="unused",
-            sticky=True,
-            actions="all",
-            length=108_000,
-            resize="pillow",
-        )
-
-    elif suite == "crafter":
-        import crafter
-        from dreamerv3.embodied.envs import from_gym
-
-        env = crafter.Env()
-        env = from_gym.FromGym(env, obs_key="image")
-
-    elif suite == "minigrid":
-        import gymnasium as gym
-        import minigrid  # noqa: F401
-        from minigrid.wrappers import ImgObsWrapper, RGBImgPartialObsWrapper
-        from dreamerv3.embodied.envs import from_gym
-
-        env = gym.make(name)
-        env = RGBImgPartialObsWrapper(env, tile_size=8)
-        env = ImgObsWrapper(env)
-        env = from_gym.FromGym(env, obs_key="image")
-
-    elif suite == "minecraft":
-        from dreamerv3.embodied.envs import minecraft
-
-        env = minecraft.MinecraftDiamond(
-            repeat=1,
-            size=(64, 64),
-            break_speed=100.0,
-            gamma=10.0,
-            sticky_attack=30,
-            sticky_jump=10,
-            pitch_limit=(-60, 60),
-            logs=False,
-        )
-
-    else:
-        raise ValueError(f"Unknown task suite: {suite!r} (from task={task!r})")
-
-    env = dreamerv3.wrap_env(env, config)
-    return env
-
-
 def main():
     args, remaining = parse_args()
 
     import dreamerv3
     from dreamerv3 import embodied
+
+    from env_builders import make_env
 
     config = embodied.Config(dreamerv3.Agent.configs["defaults"])
     if args.preset not in dreamerv3.Agent.configs:
