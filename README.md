@@ -41,7 +41,8 @@ rl-dreamer/
 └── scripts/
     ├── train.py                  # Generic CLI trainer
     ├── evaluate.py               # Load and roll out a trained agent
-    └── record.py                 # Save MP4 videos of a trained agent
+    ├── record.py                 # Save MP4 videos of a trained agent
+    └── visualize_network.py      # Render architecture diagrams as PNGs
 ```
 
 ## Run it on Google Colab
@@ -170,6 +171,35 @@ The script works for every task suite listed above — for pixel-obs
 envs (DMC, Atari, Crafter, MiniGrid, Minecraft) frames come directly
 from the observation stream, and for Gym classic-control envs the
 underlying env's `render(mode='rgb_array')` is used.
+
+## Visualizing the network
+
+`scripts/visualize_network.py` renders schematic diagrams of the
+DreamerV3 architecture as PNGs you can embed in slides, papers, or
+notebooks. It does not require a trained checkpoint — the diagrams are
+statically drawn with matplotlib — so it's useful as a teaching aid
+alongside [`docs/architecture.md`](docs/architecture.md).
+
+```bash
+pip install matplotlib
+
+# Render all three diagrams into docs/figures/
+python scripts/visualize_network.py
+
+# Or pick a different output directory
+python scripts/visualize_network.py --output /tmp/dreamer_figures
+
+# Render only one diagram
+python scripts/visualize_network.py --only world_model
+```
+
+Three figures are produced:
+
+| File                  | What it shows                                                      |
+|-----------------------|--------------------------------------------------------------------|
+| `world_model.png`     | RSSM: encoder, GRU, prior/posterior, decoder and reward/continue heads |
+| `imagination.png`     | Open-loop imagination rollout scored by actor and critic           |
+| `pipeline.png`        | Three nested loops: environment → replay → world model → actor-critic |
 
 ## Learning resources
 

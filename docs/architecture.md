@@ -7,6 +7,11 @@ loop but want a clearer mental model before touching the code.
 If you want the full technical detail, read the paper:
 <https://arxiv.org/abs/2301.04104>.
 
+> The mermaid diagrams below render directly on GitHub. For standalone
+> PNG versions (useful for slides or papers), run
+> `python scripts/visualize_network.py` — this writes `world_model.png`,
+> `imagination.png`, and `pipeline.png` into `docs/figures/`.
+
 ---
 
 ## The three nested loops
