@@ -42,6 +42,7 @@ rl-dreamer/
     ├── train.py                  # Generic CLI trainer
     ├── evaluate.py               # Load and roll out a trained agent
     ├── record.py                 # Save MP4 videos of a trained agent
+    ├── visualize_dreams.py       # World-model reconstruction & dream videos
     └── visualize_network.py      # Render architecture diagrams as PNGs
 ```
 
@@ -171,6 +172,34 @@ The script works for every task suite listed above — for pixel-obs
 envs (DMC, Atari, Crafter, MiniGrid, Minecraft) frames come directly
 from the observation stream, and for Gym classic-control envs the
 underlying env's `render(mode='rgb_array')` is used.
+
+## Visualizing world-model dreams
+
+`scripts/visualize_dreams.py` shows what the world model *thinks* and
+*imagines*. Unlike `record.py` (which captures the agent's behaviour in
+the real environment), this script uses `agent.report()` to extract:
+
+- **Reconstructions** — the decoder's output when fed posterior latents
+  from real observations.
+- **Open-loop imagination** — what the model "dreams" when running
+  purely from the prior, with no new observations.
+
+```bash
+pip install imageio imageio-ffmpeg
+
+python scripts/visualize_dreams.py \
+    --task crafter_reward \
+    --preset size25m \
+    --logdir ~/logdir/crafter
+```
+
+Outputs are written to `<logdir>/dreams/` (override with `--output`).
+Each visual key from `agent.report()` is saved as both an MP4 and a
+contact-sheet PNG (a grid of sampled frames).
+
+The script first tries to load a batch from the saved replay buffer
+under `<logdir>/replay/`. If none exists it falls back to collecting a
+live rollout. A trained checkpoint is required.
 
 ## Visualizing the network
 
