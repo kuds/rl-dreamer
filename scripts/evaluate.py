@@ -35,9 +35,7 @@ def main():
     import dreamerv3
     from dreamerv3 import embodied
 
-    # Import the same env builder used for training.
-    sys.path.insert(0, str(embodied.Path(__file__).parent))
-    from train import make_env  # type: ignore
+    from env_builders import make_env
 
     config = embodied.Config(dreamerv3.Agent.configs["defaults"])
     config = config.update(dreamerv3.Agent.configs[args.preset])

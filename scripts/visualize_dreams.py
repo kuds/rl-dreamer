@@ -298,11 +298,9 @@ def main():
             f"Train an agent first with scripts/train.py."
         )
 
-    # We need obs_space and act_space.  Import the env builder so we can
-    # create a throwaway env to query spaces, even if we end up loading
-    # data from replay.
-    sys.path.insert(0, str(embodied.Path(__file__).parent))
-    from train import make_env  # type: ignore
+    # We need obs_space and act_space.  Build a throwaway env to query
+    # spaces, even if we end up loading the actual batch from replay.
+    from env_builders import make_env
 
     env = embodied.BatchEnv([make_env(args.task, config)], parallel=False)
     agent = dreamerv3.Agent(env.obs_space, env.act_space, config)
