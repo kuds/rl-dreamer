@@ -41,7 +41,9 @@ rl-dreamer/
 └── scripts/
     ├── train.py                  # Generic CLI trainer
     ├── evaluate.py               # Load and roll out a trained agent
-    └── record.py                 # Save MP4 videos of a trained agent
+    ├── record.py                 # Save MP4 videos of a trained agent
+    ├── visualize_dreams.py       # World-model reconstruction & dream videos
+    └── visualize_network.py      # Render architecture diagrams as PNGs
 ```
 
 ## Run it on Google Colab
@@ -170,6 +172,63 @@ The script works for every task suite listed above — for pixel-obs
 envs (DMC, Atari, Crafter, MiniGrid, Minecraft) frames come directly
 from the observation stream, and for Gym classic-control envs the
 underlying env's `render(mode='rgb_array')` is used.
+
+## Visualizing world-model dreams
+
+`scripts/visualize_dreams.py` shows what the world model *thinks* and
+*imagines*. Unlike `record.py` (which captures the agent's behaviour in
+the real environment), this script uses `agent.report()` to extract:
+
+- **Reconstructions** — the decoder's output when fed posterior latents
+  from real observations.
+- **Open-loop imagination** — what the model "dreams" when running
+  purely from the prior, with no new observations.
+
+```bash
+pip install imageio imageio-ffmpeg
+
+python scripts/visualize_dreams.py \
+    --task crafter_reward \
+    --preset size25m \
+    --logdir ~/logdir/crafter
+```
+
+Outputs are written to `<logdir>/dreams/` (override with `--output`).
+Each visual key from `agent.report()` is saved as both an MP4 and a
+contact-sheet PNG (a grid of sampled frames).
+
+The script first tries to load a batch from the saved replay buffer
+under `<logdir>/replay/`. If none exists it falls back to collecting a
+live rollout. A trained checkpoint is required.
+
+## Visualizing the network
+
+`scripts/visualize_network.py` renders schematic diagrams of the
+DreamerV3 architecture as PNGs you can embed in slides, papers, or
+notebooks. It does not require a trained checkpoint — the diagrams are
+statically drawn with matplotlib — so it's useful as a teaching aid
+alongside [`docs/architecture.md`](docs/architecture.md).
+
+```bash
+pip install matplotlib
+
+# Render all three diagrams into docs/figures/
+python scripts/visualize_network.py
+
+# Or pick a different output directory
+python scripts/visualize_network.py --output /tmp/dreamer_figures
+
+# Render only one diagram
+python scripts/visualize_network.py --only world_model
+```
+
+Three figures are produced:
+
+| File                  | What it shows                                                      |
+|-----------------------|--------------------------------------------------------------------|
+| `world_model.png`     | RSSM: encoder, GRU, prior/posterior, decoder and reward/continue heads |
+| `imagination.png`     | Open-loop imagination rollout scored by actor and critic           |
+| `pipeline.png`        | Three nested loops: environment → replay → world model → actor-critic |
 
 ## Learning resources
 
