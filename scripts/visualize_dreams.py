@@ -113,6 +113,45 @@ def save_report_outputs(report, output_dir, fps, sheet_cols):
     return saved
 
 
+def save_side_by_side(real, dream, path, fps, label_left="env", label_right="dream"):
+    """Write a side-by-side video of two ``[T, H, W, C]`` arrays.
+
+    The left panel shows the real env frames from the batch; the right
+    panel shows the model's open-loop reconstruction. Both arrays must
+    have the same length and height; widths may differ. A 2-px black
+    separator is drawn between them.
+    """
+    import imageio
+    import numpy as np
+
+    real = _to_uint8(np.asarray(real))
+    dream = _to_uint8(np.asarray(dream))
+
+    T = min(real.shape[0], dream.shape[0])
+    real, dream = real[:T], dream[:T]
+
+    if real.shape[1] != dream.shape[1]:
+        # Pad the shorter one vertically so heights match.
+        H = max(real.shape[1], dream.shape[1])
+        real = _pad_to_height(real, H)
+        dream = _pad_to_height(dream, H)
+
+    sep = np.zeros((T, real.shape[1], 2, real.shape[3]), dtype=np.uint8)
+    combined = np.concatenate([real, sep, dream], axis=2)
+    imageio.mimsave(str(path), list(combined), fps=fps, macro_block_size=1)
+
+
+def _pad_to_height(arr, H):
+    import numpy as np
+
+    pad = H - arr.shape[1]
+    if pad <= 0:
+        return arr
+    top = pad // 2
+    bot = pad - top
+    return np.pad(arr, ((0, 0), (top, bot), (0, 0), (0, 0)))
+
+
 def save_observation_video(batch, output_dir, fps, sheet_cols):
     """Fallback: save raw observation frames when ``report()`` has nothing.
 
@@ -143,6 +182,110 @@ def save_observation_video(batch, output_dir, fps, sheet_cols):
 
 
 # ------------------------------------------------------------------
+# Best-checkpoint selection
+# ------------------------------------------------------------------
+
+
+def _parse_step_from_name(path):
+    """Pull the trailing step number out of ``checkpoint_<step>.ckpt``.
+
+    Only matches patterns where the stem ends with ``_<digits>`` or is
+    purely digits, so the rolling ``checkpoint.ckpt`` (no number) and
+    rotated names like ``checkpoint.1.ckpt`` (small index, not a step)
+    are not mistaken for step snapshots.
+    """
+    import re
+
+    m = re.match(r"(?:.*_)?(\d{3,})$", path.stem)
+    return int(m.group(1)) if m else None
+
+
+def _list_checkpoints(logdir):
+    """Return all ``*.ckpt`` files in ``logdir``."""
+    return sorted(Path(logdir).glob("*.ckpt"))
+
+
+def _best_step_from_metrics(logdir, return_keys=("episode/score", "eval/return", "train/return")):
+    """Scan ``metrics.jsonl`` for the step with the highest episode return.
+
+    Returns ``(step, value, key)`` or ``None`` if metrics are missing /
+    contain none of the expected keys.
+    """
+    import json
+
+    path = Path(logdir) / "metrics.jsonl"
+    if not path.exists():
+        return None
+
+    best = None
+    chosen_key = None
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                step = record.get("step") or record.get("global_step")
+                if step is None:
+                    continue
+                for key in return_keys:
+                    if key in record:
+                        value = float(record[key])
+                        if best is None or value > best[1]:
+                            best = (int(step), value, key)
+                            chosen_key = key
+                        break
+    except OSError:
+        return None
+    return best
+
+
+def select_best_checkpoint(logdir):
+    """Pick the highest-performing checkpoint under ``logdir``.
+
+    Strategy, in order:
+
+    1. If snapshot checkpoints (``checkpoint_<step>.ckpt``) exist and
+       ``metrics.jsonl`` has episode-return entries, return the snapshot
+       whose step is closest to the best-return step.
+    2. If snapshots exist but no metrics, return the latest snapshot by
+       step number (most-trained ≈ best, on average).
+    3. Otherwise, fall back to ``checkpoint.ckpt``.
+
+    Returns
+    -------
+    (pathlib.Path | None, str)
+        ``(path, source)`` where ``source`` is one of
+        ``"best-return"``, ``"latest-step"``, or ``"checkpoint.ckpt"``.
+        ``path`` is ``None`` if no checkpoint exists.
+    """
+    logdir = Path(logdir)
+    snapshots = [
+        p for p in _list_checkpoints(logdir)
+        if _parse_step_from_name(p) is not None
+    ]
+
+    if snapshots:
+        best = _best_step_from_metrics(logdir)
+        if best is not None:
+            best_step = best[0]
+            chosen = min(snapshots, key=lambda p: abs(_parse_step_from_name(p) - best_step))
+            return chosen, f"best-return ({best[2]}={best[1]:.3f} @ step {best_step})"
+        # No metrics: take the most-trained snapshot.
+        latest = max(snapshots, key=_parse_step_from_name)
+        return latest, "latest-step"
+
+    rolling = logdir / "checkpoint.ckpt"
+    if rolling.exists():
+        return rolling, "checkpoint.ckpt"
+    return None, "missing"
+
+
+# ------------------------------------------------------------------
 # Library entry point
 # ------------------------------------------------------------------
 
@@ -165,15 +308,19 @@ class DreamVisualizer:
     preset : str
         DreamerV3 size preset (``"size1m"``, ``"size12m"``, ...).
     logdir : str | pathlib.Path
-        Directory containing ``checkpoint.ckpt`` and (optionally) a
+        Directory containing the checkpoint(s) and (optionally) a
         ``replay/`` subdirectory.
     config : dreamerv3.embodied.Config, optional
         Pre-built config. Use this when calling from a CLI entry point
         that already folded in user ``embodied.Flags`` overrides. When
         omitted, ``preset`` is applied on top of the DreamerV3 defaults.
+    checkpoint : str | pathlib.Path, optional
+        Explicit checkpoint file to load. When omitted, the
+        best-performing snapshot is auto-selected (see
+        :func:`select_best_checkpoint`).
     """
 
-    def __init__(self, task, preset, logdir, *, config=None):
+    def __init__(self, task, preset, logdir, *, config=None, checkpoint=None):
         import dreamerv3
         from dreamerv3 import embodied
 
@@ -194,19 +341,26 @@ class DreamVisualizer:
         self.config = config
         self.logdir = embodied.Path(config.logdir)
 
-        ckpt_path = self.logdir / "checkpoint.ckpt"
-        if not ckpt_path.exists():
+        if checkpoint is None:
+            ckpt_path, source = select_best_checkpoint(Path(str(self.logdir)))
+        else:
+            ckpt_path = Path(checkpoint)
+            source = "explicit"
+        if ckpt_path is None or not ckpt_path.exists():
             raise FileNotFoundError(
-                f"No checkpoint found at {ckpt_path}. "
+                f"No checkpoint found under {self.logdir}. "
                 f"Train an agent first with scripts/train.py."
             )
+        self.checkpoint_path = ckpt_path
+        self.checkpoint_source = source
+        print(f"loading checkpoint from {ckpt_path} (selected by: {source})")
 
         self.env = embodied.BatchEnv([make_env(task, config)], parallel=False)
         self.agent = dreamerv3.Agent(self.env.obs_space, self.env.act_space, config)
 
-        checkpoint = embodied.Checkpoint(ckpt_path)
-        checkpoint.agent = self.agent
-        checkpoint.load(keys=["agent"])
+        ckpt = embodied.Checkpoint(embodied.Path(str(ckpt_path)))
+        ckpt.agent = self.agent
+        ckpt.load(keys=["agent"])
         self.batch_source = None
 
     def load_batch_from_replay(self):
@@ -313,6 +467,91 @@ class DreamVisualizer:
 
         return saved
 
+    def generate_side_by_side(
+        self, output_dir=None, *, fps=10, batch=None, dream_key=None
+    ):
+        """Render real env frames next to the model's dream frames.
+
+        Pulls the ``image`` stream out of the batch fed to
+        ``agent.report()`` and pairs it horizontally with the model's
+        open-loop reconstruction. Returns the output path, or ``None``
+        if neither stream is available (e.g. vector-only tasks, or a
+        report without an open-loop video).
+
+        Parameters
+        ----------
+        output_dir : str | pathlib.Path, optional
+            Where to write the MP4. Defaults to ``<logdir>/dreams``.
+        fps : int
+            Frames per second.
+        batch : dict, optional
+            Pre-built batch. When omitted, one is drawn via
+            :meth:`get_batch`.
+        dream_key : str, optional
+            Specific ``agent.report()`` key to use as the dream stream.
+            When ``None``, the first key matching ``openl*`` is used,
+            falling back to ``recon*``.
+        """
+        import numpy as np
+
+        if batch is None:
+            batch = self.get_batch()
+
+        if "image" not in batch:
+            print(
+                "[warn] batch has no 'image' stream — side-by-side visualization "
+                "needs a pixel-based task (DMC, Atari, Crafter, MiniGrid, Minecraft)."
+            )
+            return None
+
+        try:
+            report = self.agent.report(batch)
+        except Exception as exc:
+            print(f"[warn] agent.report() failed: {exc}")
+            return None
+
+        dream = _select_dream_stream(report, dream_key)
+        if dream is None:
+            print(
+                "[warn] no openl/recon video stream found in report; "
+                f"available keys: {sorted(report)}"
+            )
+            return None
+
+        real = np.asarray(batch["image"])
+        if real.ndim == 5:
+            real = real[0]
+
+        output_dir = (
+            Path(output_dir) if output_dir else Path(str(self.logdir)) / "dreams"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_path = output_dir / "side_by_side.mp4"
+
+        save_side_by_side(real, dream, out_path, fps=fps)
+        return out_path
+
+
+def _select_dream_stream(report, dream_key=None):
+    """Pull a ``[T, H, W, C]`` frame stack out of ``agent.report()``."""
+    import numpy as np
+
+    candidates = [dream_key] if dream_key else None
+    if candidates is None:
+        openl = sorted(k for k in report if "openl" in k.lower())
+        recon = sorted(k for k in report if "recon" in k.lower())
+        candidates = openl + recon
+
+    for key in candidates:
+        if key not in report:
+            continue
+        arr = np.asarray(report[key])
+        if arr.ndim == 5 and arr.shape[-1] in (1, 3, 4):
+            arr = arr[0]
+        if arr.ndim == 4 and arr.shape[-1] in (1, 3, 4):
+            return arr
+    return None
+
 
 def _import_make_env():
     """Import ``make_env`` whether this module is loaded as ``scripts.visualize_dreams``
@@ -355,6 +594,20 @@ def parse_args():
         type=int,
         help="Columns in the contact-sheet PNG (default: 10).",
     )
+    parser.add_argument(
+        "--side-by-side",
+        action="store_true",
+        help="Also write side_by_side.mp4 pairing real env frames with the dream.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        type=str,
+        help=(
+            "Explicit checkpoint file. When omitted, the highest-return "
+            "snapshot is auto-selected from <logdir>."
+        ),
+    )
     args, remaining = parser.parse_known_args()
     return args, remaining
 
@@ -385,14 +638,24 @@ def main():
     sys.argv = [sys.argv[0]] + remaining
     config = embodied.Flags(config).parse()
 
-    viz = DreamVisualizer(args.task, args.preset, args.logdir, config=config)
-    print(f"loaded checkpoint from {viz.logdir / 'checkpoint.ckpt'}")
+    viz = DreamVisualizer(
+        args.task,
+        args.preset,
+        args.logdir,
+        config=config,
+        checkpoint=args.checkpoint,
+    )
 
     saved = viz.generate(
         output_dir=args.output,
         fps=args.fps,
         sheet_cols=args.sheet_cols,
     )
+
+    if args.side_by_side:
+        sbs_path = viz.generate_side_by_side(output_dir=args.output, fps=args.fps)
+        if sbs_path is not None:
+            saved.append(("side_by_side", sbs_path, None))
 
     if not saved:
         print(
