@@ -1,30 +1,26 @@
 """Visualize DreamerV3's world model dreams.
 
-Loads a trained checkpoint and produces videos showing what the world
-model "sees" (posterior reconstructions) and "dreams" (open-loop
-imagination from the prior).  This complements ``scripts/record.py``
-which only shows the agent's behaviour in the *real* environment.
+This module is both a CLI script and a library. Notebooks and other
+callers can import :class:`DreamVisualizer` directly instead of shelling
+out::
 
-The script calls ``agent.report(batch)`` — DreamerV3's standard hook
-for producing eval-time visualizations.  It first tries to load a
-batch from the saved replay buffer under ``<logdir>/replay/``; if none
-exists, it falls back to collecting a short rollout from the live
-environment.
+    from scripts.visualize_dreams import DreamVisualizer
 
-Every video-like array returned by ``report()`` is saved as an MP4 and
-as a contact-sheet PNG (a grid of sampled frames for quick inspection).
+    viz = DreamVisualizer(
+        task="crafter_reward",
+        preset="size25m",
+        logdir="/root/logdir/crafter",
+    )
+    saved = viz.generate(fps=10)
 
-Example:
+The CLI entry point is preserved for backwards compatibility::
+
     python scripts/visualize_dreams.py \\
         --task crafter_reward \\
         --preset size25m \\
         --logdir ~/logdir/crafter
 
-    python scripts/visualize_dreams.py \\
-        --task dmc_walker_walk \\
-        --preset size12m \\
-        --logdir ~/logdir/walker \\
-        --fps 15
+Both paths call into the same class, so behaviour stays in sync.
 
 Requirements beyond the base install:
     pip install imageio imageio-ffmpeg
@@ -42,115 +38,7 @@ warnings.filterwarnings("ignore", ".*the imp module is deprecated.*")
 
 
 # ------------------------------------------------------------------
-# CLI
-# ------------------------------------------------------------------
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Visualize DreamerV3 world-model reconstructions and dreams.",
-        add_help=False,
-    )
-    parser.add_argument("--task", required=True, type=str)
-    parser.add_argument("--preset", default="size12m", type=str)
-    parser.add_argument("--logdir", required=True, type=str)
-    parser.add_argument(
-        "--fps",
-        default=10,
-        type=int,
-        help="Frames per second for output MP4s (default: 10).",
-    )
-    parser.add_argument(
-        "--output",
-        default=None,
-        type=str,
-        help="Override output directory. Defaults to <logdir>/dreams.",
-    )
-    parser.add_argument(
-        "--sheet-cols",
-        default=10,
-        type=int,
-        help="Columns in the contact-sheet PNG (default: 10).",
-    )
-    args, remaining = parser.parse_known_args()
-    return args, remaining
-
-
-# ------------------------------------------------------------------
-# Data loading helpers
-# ------------------------------------------------------------------
-
-
-def load_batch_from_replay(logdir, config):
-    """Try to sample a single batch from the saved replay buffer.
-
-    Returns a dict of numpy arrays with shape ``[B, T, ...]`` or
-    ``None`` if the replay directory is missing / empty.
-    """
-    from dreamerv3 import embodied
-
-    replay_dir = logdir / "replay"
-    if not replay_dir.exists():
-        return None
-    try:
-        replay = embodied.replay.Replay(
-            length=config.batch_length,
-            capacity=config.replay.size,
-            directory=replay_dir,
-        )
-        # The dataset yields dicts of arrays with shape [B, T, ...].
-        dataset = replay.dataset(batch=config.batch_size)
-        batch = next(iter(dataset))
-        return batch
-    except Exception as exc:
-        print(f"[warn] could not load batch from replay: {exc}")
-        return None
-
-
-def collect_batch(env, agent, length):
-    """Run a rollout and format it as a ``[1, T, ...]`` batch dict.
-
-    This is the fallback used when no replay data is available.
-    """
-    import numpy as np
-
-    obs = env.reset()
-    state = None
-
-    steps = []
-
-    # --- first timestep (is_first=True, action=zeros) ---
-    first = {}
-    for k, v in obs.items():
-        first[k] = np.asarray(v[0])  # strip env batch dim
-    act_space = env.act_space["action"]
-    first["action"] = np.zeros(act_space.shape, dtype=act_space.dtype)
-    steps.append(first)
-
-    for t in range(1, length):
-        action, state = agent.policy(obs, state, mode="eval")
-        obs = env.step(action)
-
-        step = {}
-        for k, v in obs.items():
-            step[k] = np.asarray(v[0])
-        step["action"] = np.asarray(action["action"][0])
-        steps.append(step)
-
-        if bool(obs["is_last"][0]):
-            if t < length - 1:
-                obs = env.reset()
-                state = None
-
-    # Stack to [1, T, ...]
-    batch = {}
-    for k in steps[0]:
-        batch[k] = np.stack([s[k] for s in steps], axis=0)[np.newaxis]
-    return batch
-
-
-# ------------------------------------------------------------------
-# Video / image saving
+# Low-level save helpers (shared by the class and the fallback path)
 # ------------------------------------------------------------------
 
 
@@ -226,10 +114,10 @@ def save_report_outputs(report, output_dir, fps, sheet_cols):
 
 
 def save_observation_video(batch, output_dir, fps, sheet_cols):
-    """Fallback: save raw observation frames when report() is unavailable.
+    """Fallback: save raw observation frames when ``report()`` has nothing.
 
-    Looks for an ``image`` key in the batch.  If the task only has
-    vector observations, nothing is written.
+    Looks for an ``image`` key in the batch. If the task only has vector
+    observations, nothing is written.
     """
     import numpy as np
 
@@ -237,7 +125,6 @@ def save_observation_video(batch, output_dir, fps, sheet_cols):
     if "image" not in batch:
         return saved
 
-    # batch["image"] has shape [B, T, H, W, C]
     frames = np.asarray(batch["image"])
     if frames.ndim == 5:
         frames = frames[0]
@@ -256,8 +143,220 @@ def save_observation_video(batch, output_dir, fps, sheet_cols):
 
 
 # ------------------------------------------------------------------
-# Main
+# Library entry point
 # ------------------------------------------------------------------
+
+
+class DreamVisualizer:
+    """Load a DreamerV3 checkpoint and render world-model dreams.
+
+    The class wraps the full pipeline:
+
+    1. Build the env and restore the agent from ``<logdir>/checkpoint.ckpt``.
+    2. Sample a batch from the replay buffer under ``<logdir>/replay/``,
+       or — if none exists — collect a live rollout.
+    3. Call ``agent.report(batch)`` and persist every visual output to
+       ``<logdir>/dreams/`` (or a caller-supplied directory).
+
+    Parameters
+    ----------
+    task : str
+        Task spec of the form ``"<suite>_<name>"`` (e.g. ``"crafter_reward"``).
+    preset : str
+        DreamerV3 size preset (``"size1m"``, ``"size12m"``, ...).
+    logdir : str | pathlib.Path
+        Directory containing ``checkpoint.ckpt`` and (optionally) a
+        ``replay/`` subdirectory.
+    config : dreamerv3.embodied.Config, optional
+        Pre-built config. Use this when calling from a CLI entry point
+        that already folded in user ``embodied.Flags`` overrides. When
+        omitted, ``preset`` is applied on top of the DreamerV3 defaults.
+    """
+
+    def __init__(self, task, preset, logdir, *, config=None):
+        import dreamerv3
+        from dreamerv3 import embodied
+
+        make_env = _import_make_env()
+
+        if config is None:
+            config = embodied.Config(dreamerv3.Agent.configs["defaults"])
+            if preset not in dreamerv3.Agent.configs:
+                raise ValueError(
+                    f"Unknown preset {preset!r}. "
+                    f"Known: {sorted(dreamerv3.Agent.configs)}"
+                )
+            config = config.update(dreamerv3.Agent.configs[preset])
+            config = config.update({"logdir": str(logdir)})
+
+        self.task = task
+        self.preset = preset
+        self.config = config
+        self.logdir = embodied.Path(config.logdir)
+
+        ckpt_path = self.logdir / "checkpoint.ckpt"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"No checkpoint found at {ckpt_path}. "
+                f"Train an agent first with scripts/train.py."
+            )
+
+        self.env = embodied.BatchEnv([make_env(task, config)], parallel=False)
+        self.agent = dreamerv3.Agent(self.env.obs_space, self.env.act_space, config)
+
+        checkpoint = embodied.Checkpoint(ckpt_path)
+        checkpoint.agent = self.agent
+        checkpoint.load(keys=["agent"])
+        self.batch_source = None
+
+    def load_batch_from_replay(self):
+        """Try to sample a batch from the saved replay buffer.
+
+        Returns a dict of numpy arrays with shape ``[B, T, ...]`` or
+        ``None`` if the replay directory is missing / unreadable.
+        """
+        from dreamerv3 import embodied
+
+        replay_dir = self.logdir / "replay"
+        if not replay_dir.exists():
+            return None
+        try:
+            replay = embodied.replay.Replay(
+                length=self.config.batch_length,
+                capacity=self.config.replay.size,
+                directory=replay_dir,
+            )
+            dataset = replay.dataset(batch=self.config.batch_size)
+            return next(iter(dataset))
+        except Exception as exc:
+            print(f"[warn] could not load batch from replay: {exc}")
+            return None
+
+    def collect_batch(self, length=None):
+        """Run a live rollout and format it as a ``[1, T, ...]`` batch dict."""
+        import numpy as np
+
+        if length is None:
+            length = self.config.batch_length
+
+        obs = self.env.reset()
+        state = None
+        steps = []
+
+        first = {k: np.asarray(v[0]) for k, v in obs.items()}
+        act_space = self.env.act_space["action"]
+        first["action"] = np.zeros(act_space.shape, dtype=act_space.dtype)
+        steps.append(first)
+
+        for t in range(1, length):
+            action, state = self.agent.policy(obs, state, mode="eval")
+            obs = self.env.step(action)
+            step = {k: np.asarray(v[0]) for k, v in obs.items()}
+            step["action"] = np.asarray(action["action"][0])
+            steps.append(step)
+            if bool(obs["is_last"][0]) and t < length - 1:
+                obs = self.env.reset()
+                state = None
+
+        return {k: np.stack([s[k] for s in steps], axis=0)[np.newaxis] for k in steps[0]}
+
+    def get_batch(self):
+        """Return a batch, preferring replay and falling back to a rollout."""
+        batch = self.load_batch_from_replay()
+        if batch is None:
+            batch = self.collect_batch()
+            self.batch_source = "rollout"
+        else:
+            self.batch_source = "replay"
+        return batch
+
+    def generate(self, output_dir=None, *, fps=10, sheet_cols=10, batch=None):
+        """Run ``agent.report()`` on a batch and save videos + sheets.
+
+        Parameters
+        ----------
+        output_dir : str | pathlib.Path, optional
+            Where to write MP4s and PNGs. Defaults to
+            ``<logdir>/dreams``.
+        fps : int
+            Frames per second for the output MP4s.
+        sheet_cols : int
+            Number of columns in the contact-sheet PNGs.
+        batch : dict, optional
+            Pre-built batch to use. When omitted, one is drawn from
+            replay / a live rollout via :meth:`get_batch`.
+
+        Returns
+        -------
+        list of (str, pathlib.Path, tuple)
+            One entry per file written: ``(key, path, shape)``.
+        """
+        if batch is None:
+            batch = self.get_batch()
+
+        output_dir = Path(output_dir) if output_dir else Path(str(self.logdir)) / "dreams"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        saved = []
+        try:
+            report = self.agent.report(batch)
+            saved = save_report_outputs(
+                report, output_dir, fps=fps, sheet_cols=sheet_cols
+            )
+        except Exception as exc:
+            print(f"[warn] agent.report() failed: {exc}")
+
+        if not saved:
+            saved = save_observation_video(
+                batch, output_dir, fps=fps, sheet_cols=sheet_cols
+            )
+
+        return saved
+
+
+def _import_make_env():
+    """Import ``make_env`` whether this module is loaded as ``scripts.visualize_dreams``
+    (notebook / library use) or as a top-level script."""
+    try:
+        from .env_builders import make_env  # package-relative
+    except ImportError:
+        from env_builders import make_env  # sys.path includes scripts/
+    return make_env
+
+
+# ------------------------------------------------------------------
+# CLI
+# ------------------------------------------------------------------
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Visualize DreamerV3 world-model reconstructions and dreams.",
+        add_help=False,
+    )
+    parser.add_argument("--task", required=True, type=str)
+    parser.add_argument("--preset", default="size12m", type=str)
+    parser.add_argument("--logdir", required=True, type=str)
+    parser.add_argument(
+        "--fps",
+        default=10,
+        type=int,
+        help="Frames per second for output MP4s (default: 10).",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        type=str,
+        help="Override output directory. Defaults to <logdir>/dreams.",
+    )
+    parser.add_argument(
+        "--sheet-cols",
+        default=10,
+        type=int,
+        help="Columns in the contact-sheet PNG (default: 10).",
+    )
+    args, remaining = parser.parse_known_args()
+    return args, remaining
 
 
 def main():
@@ -271,12 +370,10 @@ def main():
             "    pip install imageio imageio-ffmpeg"
         ) from exc
 
-    import numpy as np
-
     import dreamerv3
     from dreamerv3 import embodied
 
-    # ---- config ----
+    # Build the config so user-supplied --foo.bar flags still flow through.
     config = embodied.Config(dreamerv3.Agent.configs["defaults"])
     if args.preset not in dreamerv3.Agent.configs:
         raise SystemExit(
@@ -288,70 +385,14 @@ def main():
     sys.argv = [sys.argv[0]] + remaining
     config = embodied.Flags(config).parse()
 
-    logdir = embodied.Path(config.logdir)
+    viz = DreamVisualizer(args.task, args.preset, args.logdir, config=config)
+    print(f"loaded checkpoint from {viz.logdir / 'checkpoint.ckpt'}")
 
-    # ---- checkpoint ----
-    ckpt_path = logdir / "checkpoint.ckpt"
-    if not ckpt_path.exists():
-        raise SystemExit(
-            f"No checkpoint found at {ckpt_path}.\n"
-            f"Train an agent first with scripts/train.py."
-        )
-
-    # We need obs_space and act_space.  Build a throwaway env to query
-    # spaces, even if we end up loading the actual batch from replay.
-    from env_builders import make_env
-
-    env = embodied.BatchEnv([make_env(args.task, config)], parallel=False)
-    agent = dreamerv3.Agent(env.obs_space, env.act_space, config)
-
-    checkpoint = embodied.Checkpoint(ckpt_path)
-    checkpoint.agent = agent
-    checkpoint.load(keys=["agent"])
-    print(f"loaded checkpoint from {ckpt_path}")
-
-    # ---- get a batch ----
-    print("preparing batch …")
-    batch = load_batch_from_replay(logdir, config)
-    source = "replay"
-    if batch is None:
-        print("no replay data found — collecting a fresh rollout")
-        batch = collect_batch(env, agent, config.batch_length)
-        source = "rollout"
-    else:
-        print(f"loaded batch from replay (keys: {sorted(batch.keys())})")
-
-    # Show batch shapes for debugging.
-    for k in sorted(batch):
-        v = np.asarray(batch[k])
-        print(f"  batch[{k!r}]: {v.shape} {v.dtype}")
-
-    # ---- output directory ----
-    output_dir = Path(args.output) if args.output else Path(str(logdir)) / "dreams"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # ---- call agent.report() ----
-    saved = []
-    try:
-        print("calling agent.report() …")
-        report = agent.report(batch)
-        print(f"report returned {len(report)} keys: {sorted(report.keys())}")
-        saved = save_report_outputs(
-            report, output_dir, fps=args.fps, sheet_cols=args.sheet_cols
-        )
-    except Exception as exc:
-        print(f"[warn] agent.report() failed: {exc}")
-        print("falling back to raw observation video")
-
-    # ---- fallback: save raw observation frames ----
-    if not saved:
-        print(
-            "no visual outputs from report() — "
-            "saving raw observation frames instead"
-        )
-        saved = save_observation_video(
-            batch, output_dir, fps=args.fps, sheet_cols=args.sheet_cols
-        )
+    saved = viz.generate(
+        output_dir=args.output,
+        fps=args.fps,
+        sheet_cols=args.sheet_cols,
+    )
 
     if not saved:
         print(
@@ -361,15 +402,15 @@ def main():
         )
         return
 
-    # ---- summary ----
+    output_dir = Path(args.output) if args.output else Path(str(viz.logdir)) / "dreams"
     print(f"\n{'='*60}")
     print(f"  {len(saved)} file(s) written to {output_dir}")
-    print(f"  data source: {source}")
+    print(f"  data source: {viz.batch_source}")
     print(f"{'='*60}")
     for key, path, shape in saved:
-        suffix = path.suffix
+        suffix = Path(path).suffix
         kind = "video" if suffix == ".mp4" else "image"
-        print(f"  [{kind:5s}] {key:30s} {str(shape):20s} → {path.name}")
+        print(f"  [{kind:5s}] {key:30s} {str(shape):20s} → {Path(path).name}")
     print()
 
 
