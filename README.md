@@ -38,12 +38,14 @@ rl-dreamer/
 │   ├── architecture.md           # World-model + actor-critic diagrams
 │   ├── LEARNING.md               # Curated reading / watching list
 │   └── tensorboard_guide.md      # What each training metric means
-└── scripts/
+└── scripts/                     # Dual-purpose CLI scripts + importable library
+    ├── __init__.py
+    ├── env_builders.py           # Shared make_env() for every task suite
     ├── train.py                  # Generic CLI trainer
-    ├── evaluate.py               # Load and roll out a trained agent
-    ├── record.py                 # Save MP4 videos of a trained agent
-    ├── visualize_dreams.py       # World-model reconstruction & dream videos
-    └── visualize_network.py      # Render architecture diagrams as PNGs
+    ├── evaluate.py               # Evaluator class + CLI
+    ├── record.py                 # Recorder class + CLI
+    ├── visualize_dreams.py       # DreamVisualizer class + CLI
+    └── visualize_network.py      # render_diagram / render_all + CLI
 ```
 
 ## Run it on Google Colab
@@ -56,6 +58,11 @@ CartPole → DMC → Atari → Crafter → Minecraft. Open it directly on Colab:
 
 Remember to switch the runtime to GPU (`Runtime → Change runtime type → GPU`)
 before running the cells.
+
+The notebook reads a `LOGDIR_ROOT` variable set in section 4. Flip
+`USE_DRIVE = True` there to mount Google Drive and persist checkpoints,
+replay buffers, videos, and dreams across runtime resets — otherwise
+everything stays on Colab's ephemeral `/root/logdir`.
 
 ## Installation
 
@@ -229,6 +236,52 @@ Three figures are produced:
 | `world_model.png`     | RSSM: encoder, GRU, prior/posterior, decoder and reward/continue heads |
 | `imagination.png`     | Open-loop imagination rollout scored by actor and critic           |
 | `pipeline.png`        | Three nested loops: environment → replay → world model → actor-critic |
+
+## Using the scripts as a library
+
+`scripts/` is also an importable Python package. Notebooks and other
+Python code can bypass the CLI and call the evaluation, recording,
+dreaming, and diagramming logic directly. Every class takes the same
+triple — `task`, `preset`, `logdir` — that the CLI accepts:
+
+```python
+from pathlib import Path
+
+from scripts.evaluate import Evaluator
+from scripts.record import Recorder
+from scripts.visualize_dreams import DreamVisualizer
+from scripts.visualize_network import render_diagram, render_all
+
+logdir = Path("~/logdir/cartpole").expanduser()
+
+# 1. Evaluate a checkpoint → numpy array of episode returns.
+returns = Evaluator(
+    task="gym_CartPole-v1", preset="size1m", logdir=logdir,
+).run(episodes=5)
+
+# 2. Record rollout videos → list of {path, return, frames} dicts.
+episodes = Recorder(
+    task="gym_CartPole-v1", preset="size1m", logdir=logdir,
+).record(episodes=3, fps=30)
+
+# 3. Render world-model dreams → list of (key, path, shape) tuples.
+saved = DreamVisualizer(
+    task="crafter_reward", preset="size25m",
+    logdir=Path("~/logdir/crafter").expanduser(),
+).generate(fps=10)
+
+# 4. Draw architecture diagrams inline (no checkpoint needed).
+import matplotlib.pyplot as plt
+fig, _ = render_diagram("world_model")
+plt.show()
+```
+
+The CLI entry points under `scripts/*.py` are preserved — they now
+delegate to the same classes, so both paths stay in sync.
+
+`scripts/train.py` stays CLI-primary on purpose: long training runs
+benefit from subprocess isolation (clean JAX process state, bounded
+memory) and should not block a notebook kernel.
 
 ## Learning resources
 

@@ -1,25 +1,28 @@
 """Render the DreamerV3 network as static architecture diagrams.
 
-This script draws the DreamerV3 pipeline as a set of PNG figures using
-matplotlib. It's intended as a teaching aid that complements
-``docs/architecture.md`` — the markdown file ships mermaid diagrams that
-render on GitHub, while this script produces standalone images you can
-embed in slides, papers, or notebooks.
+This module is both a CLI script and a library. Notebooks and other
+callers can import the render helpers directly::
 
-Three diagrams are produced:
+    from scripts.visualize_network import render_diagram, render_all
 
-1. ``world_model.png``  — the Recurrent State-Space Model (RSSM) plus
+    fig, _ = render_diagram("world_model")        # inline in a notebook
+    render_all(output_dir="docs/figures")         # write all PNGs to disk
+
+Three diagrams are defined:
+
+1. ``world_model``  — the Recurrent State-Space Model (RSSM) plus
    encoder, decoder, and the reward / continue prediction heads.
-2. ``imagination.png``  — the open-loop imagination rollout that feeds
+2. ``imagination``  — the open-loop imagination rollout that feeds
    the actor-critic learning loop.
-3. ``pipeline.png``     — the outer three-loop training diagram
+3. ``pipeline``     — the outer three-loop training diagram
    (environment → replay → world model → imagination → actor/critic).
 
 The diagrams are schematic. Tensor shapes are shown symbolically
 (``D``, ``S``, ``N``) rather than with preset-specific numbers, since
 those drift across DreamerV3 releases.
 
-Usage:
+CLI usage is preserved::
+
     # Render all three diagrams into docs/figures/
     python scripts/visualize_network.py
 
@@ -480,7 +483,7 @@ def draw_pipeline(ax):
 
 
 # --------------------------------------------------------------------------
-# CLI
+# Library
 # --------------------------------------------------------------------------
 
 
@@ -489,6 +492,102 @@ DIAGRAMS = {
     "imagination": ("imagination.png", draw_imagination, (12, 7)),
     "pipeline": ("pipeline.png", draw_pipeline, (12, 6)),
 }
+
+
+def _require_matplotlib():
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "scripts/visualize_network.py needs matplotlib. Install it with:\n"
+            "    pip install matplotlib"
+        ) from exc
+
+
+def render_diagram(name, ax=None, *, figsize=None):
+    """Render a single named diagram.
+
+    Parameters
+    ----------
+    name : str
+        One of the keys in :data:`DIAGRAMS` (``"world_model"``,
+        ``"imagination"``, ``"pipeline"``).
+    ax : matplotlib.axes.Axes, optional
+        Render onto this Axes. When ``None``, a fresh figure is created
+        with the diagram's default ``figsize``.
+    figsize : tuple, optional
+        Override the default figsize when creating a new figure. Ignored
+        when ``ax`` is provided.
+
+    Returns
+    -------
+    (fig, ax) : tuple
+        The matplotlib Figure and Axes containing the diagram.
+    """
+    _require_matplotlib()
+    import matplotlib.pyplot as plt
+
+    if name not in DIAGRAMS:
+        raise ValueError(
+            f"Unknown diagram {name!r}. Known: {sorted(DIAGRAMS)}"
+        )
+    _filename, draw_fn, default_figsize = DIAGRAMS[name]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize or default_figsize)
+    else:
+        fig = ax.figure
+    draw_fn(ax)
+    fig.tight_layout()
+    return fig, ax
+
+
+def render_all(output_dir="docs/figures", *, dpi=160, only=None, verbose=True):
+    """Render diagrams as PNG files.
+
+    Parameters
+    ----------
+    output_dir : str | pathlib.Path
+        Directory to write PNGs into. Created if missing.
+    dpi : int
+        Output resolution.
+    only : str, optional
+        Render just one diagram by name.
+    verbose : bool
+        Print one line per file written.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Paths of files written, in render order.
+    """
+    _require_matplotlib()
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    selected = [only] if only else list(DIAGRAMS.keys())
+    written = []
+    for name in selected:
+        if name not in DIAGRAMS:
+            raise ValueError(
+                f"Unknown diagram {name!r}. Known: {sorted(DIAGRAMS)}"
+            )
+        filename, _draw_fn, _figsize = DIAGRAMS[name]
+        fig, _ax = render_diagram(name)
+        out_path = output_dir / filename
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        written.append(out_path)
+        if verbose:
+            print(f"wrote {out_path}")
+    return written
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
 
 
 def parse_args():
@@ -519,34 +618,16 @@ def parse_args():
 def main():
     args = parse_args()
 
-    try:
-        import matplotlib
-    except ImportError as exc:
-        raise SystemExit(
-            "scripts/visualize_network.py needs matplotlib. Install it with:\n"
-            "    pip install matplotlib"
-        ) from exc
+    _require_matplotlib()
+    import matplotlib
 
+    # The CLI writes PNGs to disk — no display needed — so force the
+    # non-interactive backend. Library callers (notebooks, etc.) manage
+    # their own backend.
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
-    output_dir = Path(args.output).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    selected = [args.only] if args.only else list(DIAGRAMS.keys())
-    written = []
-    for name in selected:
-        filename, draw_fn, figsize = DIAGRAMS[name]
-        fig, ax = plt.subplots(figsize=figsize)
-        draw_fn(ax)
-        fig.tight_layout()
-        out_path = output_dir / filename
-        fig.savefig(out_path, dpi=args.dpi, bbox_inches="tight")
-        plt.close(fig)
-        written.append(out_path)
-        print(f"wrote {out_path}")
-
-    print(f"\n{len(written)} diagram(s) written to {output_dir}")
+    written = render_all(output_dir=args.output, dpi=args.dpi, only=args.only)
+    print(f"\n{len(written)} diagram(s) written to {Path(args.output).expanduser()}")
 
 
 if __name__ == "__main__":

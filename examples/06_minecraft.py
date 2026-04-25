@@ -69,18 +69,6 @@ def main():
     )
     config = embodied.Flags(config).parse()
 
-    logdir = embodied.Path(config.logdir)
-    logdir.mkdir()
-    step = embodied.Counter()
-    logger = embodied.Logger(
-        step,
-        [
-            embodied.logger.TerminalOutput(),
-            embodied.logger.JSONLOutput(logdir, "metrics.jsonl"),
-            embodied.logger.TensorBoardOutput(logdir),
-        ],
-    )
-
     def make_env(index: int):
         # The MinecraftDiamond env wraps MineRL's ObtainDiamondShovel task
         # with the observation and action shaping used in the paper.
@@ -97,23 +85,8 @@ def main():
         env = dreamerv3.wrap_env(env, config)
         return env
 
-    # Minecraft envs are heavy — one parallel env is typically enough.
-    env = embodied.BatchEnv([make_env(0)], parallel=False)
-
-    agent = dreamerv3.Agent(env.obs_space, env.act_space, config)
-    replay = embodied.replay.Replay(
-        length=config.batch_length,
-        capacity=config.replay.size,
-        directory=logdir / "replay",
-    )
-
-    args = embodied.Config(
-        **config.run,
-        logdir=config.logdir,
-        batch_size=config.batch_size,
-        batch_length=config.batch_length,
-    )
-    embodied.run.train(agent, env, replay, logger, args)
+    from _common import run_training
+    run_training(config, make_env)
 
 
 if __name__ == "__main__":
